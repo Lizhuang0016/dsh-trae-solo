@@ -1,0 +1,39 @@
+{
+  "name": "dsh-trae-solo",
+  "version": "1.0.0",
+  "description": "Trae SOLO Mode Workbench for DSH — full VS Code editor, right-docked explorer/search/SCM/extensions sidebar, auto-save, and SOLO UI styling.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "resources/**",
+    "setup.sh"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-input-trigger",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    },
+    "manifestVersion": 1
+  },
+  "license": "MIT"
+}

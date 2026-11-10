@@ -1,0 +1,4 @@
+- insert:
+    - id: trae-solo
+      name: 'dsh-trae-solo'
+      config: {}
