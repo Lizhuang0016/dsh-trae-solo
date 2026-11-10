@@ -136,7 +136,7 @@ window.__ModuleLoader__.load({
     /** Trae SOLO '>_ ' boxed terminal icon (matches Screenshot `[ ▫_ Terminal 1-1 ]` & `[ ▫_ 终端 ]`) */
     function IconTraeTerminal(props) {
       const size = props?.size ?? 14
-      const color = props?.color ?? 'currentColor'
+      const color = props?.color ?? '#71717a'
       return h(
         'svg',
         {
@@ -2794,7 +2794,7 @@ window.__ModuleLoader__.load({
               }
             },
           },
-          h(IconTraeTerminal, { size: 13.5, color: '#10b981' }),
+          h(IconTraeTerminal, { size: 13.5, color: '#71717a' }),
           h('span', null, tr(ctx, 'terminalTitle')),
         ),
       )
@@ -2892,7 +2892,7 @@ window.__ModuleLoader__.load({
       return h(
         'span',
         { className: 'trae-solo-tab-chip' },
-        h(IconTraeTerminal, { size: 14, color: '#10b981' }),
+        h(IconTraeTerminal, { size: 14, color: '#71717a' }),
         h('span', { className: 'trae-solo-tab-chip-text' }, tr(ctx, 'terminalTitle')),
       )
     }
@@ -5070,7 +5070,7 @@ window.__ModuleLoader__.load({
                   order: 3,
                   title: () => tr(ctx, 'terminalTitle'),
                   description: () => tr(ctx, 'terminalDescription'),
-                  icon: (props) => h(IconTraeTerminal, { size: props?.size ?? 16, color: '#10b981' }),
+                  icon: (props) => h(IconTraeTerminal, { size: props?.size ?? 16, color: '#71717a' }),
                 },
               ],
             })
