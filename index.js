@@ -181,12 +181,12 @@ function ensureTraeConfiguration() {
         changed = true
       }
       if (!html.includes('trae-solo-layout-fix')) {
-        const inlineLayoutFix = `<script id="trae-solo-layout-fix">try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(!k)continue;if(k.includes('auxiliaryBar.hidden'))localStorage.setItem(k,'true');if(k.includes('sideBar.position'))localStorage.setItem(k,'1');if(k.includes('sideBar.hidden'))localStorage.setItem(k,'false');}}catch(e){}</script>`
+        const inlineLayoutFix = `<script nonce="1nline-m4p" id="trae-solo-layout-fix">try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(!k)continue;if(k.includes('auxiliaryBar.hidden'))localStorage.setItem(k,'true');if(k.includes('sideBar.position'))localStorage.setItem(k,'1');if(k.includes('sideBar.hidden'))localStorage.setItem(k,'false');}}catch(e){}</script>`
         html = html.replace('</head>', `\t${inlineLayoutFix}\n\t</head>`)
         changed = true
       }
       if (!html.includes('trae-solo-bridge')) {
-        const bridgeScript = `<script id="trae-solo-bridge">
+        const bridgeScript = `<script nonce="1nline-m4p" id="trae-solo-bridge">
 (function() {
   try {
     const meta = document.getElementById('vscode-workbench-web-configuration');
@@ -232,6 +232,22 @@ function ensureTraeConfiguration() {
       }
     } catch {
       // Ignore read-only or race errors
+    }
+  }
+
+  // Ensure server-main.js hashes all script tags including ones with attributes for CSP
+  const serverMainPath = join(SERVER_DIR, 'out', 'server-main.js')
+  if (existsSync(serverMainPath)) {
+    try {
+      let serverJs = readFileSync(serverMainPath, 'utf-8')
+      const oldRegex = 'const s=/<script>([\\s\\S]+?)<\\/script>/img'
+      const newRegex = 'const s=/<script\\b[^>]*>([\\s\\S]+?)<\\/script>/img'
+      if (serverJs.includes(oldRegex)) {
+        serverJs = serverJs.replace(oldRegex, newRegex)
+        writeFileSync(serverMainPath, serverJs, 'utf-8')
+      }
+    } catch {
+      // Ignore
     }
   }
 
