@@ -264,6 +264,14 @@ window.__ModuleLoader__.load({
       currentUrl: '',
       currentCwd: '',
       currentPort: null,
+      bootKey: '',
+      openedKey: '',
+      ready: false,
+      pendingOpen: null,
+      openTimer: null,
+      target: null,
+      targetListeners: new Set(),
+      forceNext: false,
     }
 
     /** Active session input state manager captured from slot props (keyed by sessionId + current active) */
@@ -299,8 +307,11 @@ window.__ModuleLoader__.load({
       return workbenchHolder.parkingLot
     }
 
-    function ensureIframe(targetUrl, cwd, port) {
+    function ensureIframe(targetUrl, cwd, port, bootKey) {
       if (!workbenchHolder.iframe) {
+        workbenchHolder.bootKey = bootKey || ''
+        workbenchHolder.openedKey = bootKey || ''
+        workbenchHolder.ready = false
         const iframe = document.createElement('iframe')
         iframe.setAttribute('data-trae-solo-iframe', 'true')
         iframe.setAttribute('allow', 'clipboard-read; clipboard-write; usb; serial; hid')
@@ -312,6 +323,9 @@ window.__ModuleLoader__.load({
         workbenchHolder.currentCwd = cwd
         workbenchHolder.currentPort = port
       } else if (workbenchHolder.currentCwd !== cwd || workbenchHolder.currentPort !== port) {
+        workbenchHolder.bootKey = bootKey || ''
+        workbenchHolder.openedKey = bootKey || ''
+        workbenchHolder.ready = false
         workbenchHolder.currentUrl = targetUrl
         workbenchHolder.currentCwd = cwd
         workbenchHolder.currentPort = port
@@ -351,17 +365,115 @@ window.__ModuleLoader__.load({
       workbenchHolder.currentUrl = ''
       workbenchHolder.currentCwd = ''
       workbenchHolder.currentPort = null
+      workbenchHolder.ready = false
+      workbenchHolder.pendingOpen = null
+      workbenchHolder.target = null
+      workbenchHolder.bootKey = ''
+      workbenchHolder.openedKey = ''
+      if (workbenchHolder.openTimer) clearTimeout(workbenchHolder.openTimer)
+      workbenchHolder.openTimer = null
     }
 
-    function extractFileFromAddress(address) {
-      if (typeof address !== 'string' || !address.startsWith('dsh-resource://file/')) return null
+    /** Binary / rich formats that DSH's own previewers handle better than a code editor. */
+    const NON_EDITOR_EXTENSIONS = new Set(
+      ('png jpg jpeg gif webp bmp ico svg tif tiff heic avif pdf doc docx xls xlsx ppt pptx odt ods odp ' +
+        'zip tar gz tgz bz2 xz 7z rar mp3 wav ogg flac m4a aac mp4 mov avi mkv webm woff woff2 ttf otf eot ' +
+        'exe dll so dylib bin class jar o a pyc wasm sqlite db').split(' '),
+    )
+
+    /** Parse `dsh-resource://file/session/<id>/<path>` or `.../absolute/<path>` (mirrors DSH's own grammar). */
+    function parseFileAddress(address) {
       try {
-        const url = new URL(address)
-        const rawPath = decodeURIComponent(url.pathname)
-        return rawPath || null
-      } catch {
-        return null
+        const prefix = 'dsh-resource://file/'
+        if (typeof address !== 'string' || !address.startsWith(prefix)) return null
+        const end = address.search(/[?#]/)
+        const [scope, ...rest] = address.slice(prefix.length, end === -1 ? undefined : end).split('/')
+        if (scope === 'session') {
+          const [id, ...segs] = rest
+          if (!id || segs.length === 0) return null
+          return { scope, sessionId: decodeURIComponent(id), path: segs.map(decodeURIComponent).join('/') }
+        }
+        if (scope === 'absolute') {
+          const segs = rest.map(decodeURIComponent)
+          if (segs.length === 0 || segs[0] === '') return null
+          return { scope, path: /^[A-Za-z]:$/.test(segs[0]) ? segs.join('/') : `/${segs.join('/')}` }
+        }
+      } catch {}
+      return null
+    }
+
+    function isAbsolutePathLike(p) {
+      return typeof p === 'string' && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p))
+    }
+
+    /** Resolve a (possibly workspace-relative) path against a cwd into an absolute path. */
+    function toAbsolutePath(path, cwd) {
+      if (!path) return ''
+      const p = String(path).replace(/\\/g, '/')
+      if (isAbsolutePathLike(p)) return p
+      if (!cwd) return p
+      return `${String(cwd).replace(/\\/g, '/').replace(/\/+$/, '')}/${p.replace(/^(\.\/)+/, '')}`
+    }
+
+    /** Absolute filesystem path for a file address, or null when it is not a file this editor should open. */
+    function resolveFileAddress(address, cwd) {
+      const info = parseFileAddress(address)
+      if (!info) return null
+      return toAbsolutePath(info.path, cwd)
+    }
+
+    function canEditorOpenAddress(address) {
+      const info = parseFileAddress(address)
+      if (!info || info.scope !== 'session') return false
+      const base = info.path.slice(info.path.lastIndexOf('/') + 1)
+      const dot = base.lastIndexOf('.')
+      const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : ''
+      return !NON_EDITOR_EXTENSIONS.has(ext)
+    }
+
+    function buildWorkbenchUrl(port, cwd, isDark, fullFile, line) {
+      const folderPath = cwd.startsWith('/') ? cwd : `/${cwd}`
+      let url = `http://127.0.0.1:${port}/?folder=${encodeURIComponent(folderPath)}&theme=${isDark ? 'dark' : 'light'}`
+      if (fullFile) {
+        const frag = line ? `#L${line}` : ''
+        const payload = JSON.stringify([['openFile', `vscode-remote://127.0.0.1:${port}${encodeURI(fullFile)}${frag}`]])
+        url += `&payload=${encodeURIComponent(payload)}`
       }
+      return url
+    }
+
+    /**
+     * Open a file inside the already-running VS Code workbench iframe.
+     * Uses the `trae-solo:open-file` bridge (patched into workbench.js by index.js); if the bridge never
+     * acknowledges (unpatched / still booting), falls back to reloading the iframe with an `openFile` payload.
+     */
+    function requestWorkbenchOpen(ctx, port, cwd, fullFile, line) {
+      const h0 = workbenchHolder
+      const iframe = h0.iframe
+      if (!iframe) return
+      const key = `${fullFile}#${line || ''}`
+      if (h0.openedKey === key && !h0.forceNext) return
+      h0.forceNext = false
+      h0.openedKey = key
+      h0.pendingOpen = { path: fullFile, line: line || null }
+      if (h0.openTimer) clearTimeout(h0.openTimer)
+      const fallback = () => {
+        h0.openTimer = null
+        if (!h0.pendingOpen) return
+        h0.pendingOpen = null
+        h0.ready = false
+        iframe.src = buildWorkbenchUrl(port, cwd, isDarkScheme(ctx), fullFile, line)
+      }
+      const flush = () => {
+        try {
+          iframe.contentWindow?.postMessage({ type: 'trae-solo:open-file', path: fullFile, line: line || null }, '*')
+        } catch {}
+        if (h0.openTimer) clearTimeout(h0.openTimer)
+        h0.openTimer = setTimeout(fallback, 1500)
+      }
+      h0.flushPending = flush
+      if (h0.ready) flush()
+      else h0.openTimer = setTimeout(fallback, 25000)
     }
 
     /* ── Workspace & Browser Reference Helpers for Composer Injection ── */
@@ -643,6 +755,127 @@ window.__ModuleLoader__.load({
       }
     }
 
+
+    /**
+     * Route DSH file-link opens (chat links, file chips, ...) into the SOLO editor tab instead of a new
+     * per-file DSH preview tab. Wraps the shared `sidebarRight.openResource`; non-editable files
+     * (pdf / images / office ...) fall through to the original implementation.
+     */
+    let targetSeqCounter = 0
+    function installFileOpenRouting(ctx) {
+      const right = ctx.get('sidebarRight')
+      if (!right || typeof right.openResource !== 'function') return () => {}
+      const original = right.openResource
+      const wrapped = function (address, options) {
+        try {
+          if (typeof address === 'string' && canEditorOpenAddress(address) && !options?.kind && !options?.destination) {
+            const fa = parseFileAddress(address)
+            const sid = right.mounted?.getSnapshot?.() || activeInputManager.sessionId
+            const cwd = sessionCwdFor(ctx, sid)
+            const full = toAbsolutePath(fa.path, cwd)
+            if (full && isAbsolutePathLike(full)) {
+              const line = Number(options?.params?.line) > 0 ? Number(options.params.line) : 0
+              targetSeqCounter += 1
+              workbenchHolder.target = { path: full, line, seq: targetSeqCounter }
+              workbenchHolder.forceNext = true
+              for (const fn of workbenchHolder.targetListeners) fn()
+              right.openTab(TAB_KIND, { revealIfOpened: true })
+              return
+            }
+          }
+        } catch (err) {
+          console.warn('[dsh-trae-solo] file routing failed, falling back:', err)
+        }
+        return original.apply(this, arguments)
+      }
+      right.openResource = wrapped
+      return () => {
+        if (right.openResource === wrapped) right.openResource = original
+      }
+    }
+
+    /* ── Absolute-path hover tooltips (composer chips + markdown file links) ── */
+
+    const CHIP_PATH_KEY = 'dsh-trae-solo:chip-paths'
+    const chipPaths = new Map()
+    function loadChipPaths() {
+      try {
+        const raw = localStorage.getItem(CHIP_PATH_KEY)
+        if (raw) for (const [k, v] of JSON.parse(raw)) chipPaths.set(k, v)
+      } catch {}
+    }
+    function rememberChipPath(label, absPath) {
+      if (!label || !absPath) return
+      loadChipPaths()
+      chipPaths.delete(label)
+      chipPaths.set(label, absPath)
+      try {
+        localStorage.setItem(CHIP_PATH_KEY, JSON.stringify([...chipPaths.entries()].slice(-300)))
+      } catch {}
+    }
+
+    function sessionCwdFor(ctx, sessionId) {
+      try {
+        const sid = sessionId || ctx.get('sidebarRight')?.mounted?.getSnapshot?.() || activeInputManager.sessionId
+        const cwd = ctx.get('sessions')?.list?.getSnapshot?.()?.byId?.[sid]?.cwd
+        if (cwd) return cwd
+        const ws = ctx.get('workspaces')?.list?.getSnapshot?.()?.items?.find((w) => w.sessionIds?.includes?.(sid))
+        return ws?.path || ctx.get('workingDirectory')?.defaultDirectory || ''
+      } catch {
+        return ''
+      }
+    }
+
+    /** Set `title` on whatever the pointer is over so the native tooltip shows the absolute path. */
+    function installAbsolutePathHover(ctx) {
+      const onOver = (e) => {
+        const t = e.target
+        if (!(t instanceof Element)) return
+        // 1) Markdown file links in chat: <button class="...fileLink..." title="<path as written by the AI>">
+        const link = t.closest('button[class*="fileLink"], button[class*="fileMention"]')
+        if (link) {
+          const raw = (link.getAttribute('data-trae-orig-title') || link.getAttribute('title') || link.textContent || '').trim()
+          if (!link.hasAttribute('data-trae-orig-title')) link.setAttribute('data-trae-orig-title', raw)
+          const m = /^(.*?)(?::(\d+)(?:-\d+)?)?$/.exec(raw)
+          const abs = toAbsolutePath(m?.[1] || raw, sessionCwdFor(ctx))
+          if (abs && isAbsolutePathLike(abs)) link.setAttribute('title', m?.[2] ? `${abs}:${m[2]}` : abs)
+          return
+        }
+        // 2) Composer chips (file/folder/trae-solo): the chip's own title is just its label.
+        const chip = t.closest('[data-composer-chip]')
+        if (chip) {
+          const inner = chip.querySelector('[title]')
+          const label = (chip.textContent || '').replace(/^@/, '').trim()
+          loadChipPaths()
+          let abs = chipPaths.get(label)
+          if (!abs) {
+            const ref = resolveChipRefPath(ctx, chip)
+            if (ref) abs = toAbsolutePath(ref, sessionCwdFor(ctx))
+          }
+          if (abs && inner) inner.setAttribute('title', abs)
+        }
+      }
+      document.addEventListener('mouseover', onOver, true)
+      return () => document.removeEventListener('mouseover', onOver, true)
+    }
+
+    /** Fallback for DSH-native file chips: match the chip's position among composer chips to the draft's occurrences. */
+    function resolveChipRefPath(ctx, chipEl) {
+      try {
+        const chips = [...document.querySelectorAll('[data-composer-chip]')].filter((c) => c.closest('[contenteditable]') === chipEl.closest('[contenteditable]'))
+        const idx = chips.indexOf(chipEl)
+        const sid = activeInputManager.sessionId
+        const entry = sid ? activeInputManager.bySession.get(sid) : null
+        const snap = readCurrentInputSnapshot(ctx, sid, entry?.useInput || activeInputManager.useInput)
+        const occ = (snap.occurrences || [])[idx]
+        const ref = occ?.ref || occ?.text
+        if (typeof ref === 'string' && !ref.startsWith('trae-ref-') && (isAbsolutePathLike(ref) || /^[^\s]+\/[^\s]*$/.test(ref) || /\.[A-Za-z0-9]+$/.test(ref))) {
+          return ref.replace(/^@"?|"?$/g, '')
+        }
+      } catch {}
+      return ''
+    }
+
     function insertWorkspaceReference(ctx, targetSessionId, fullPath, isDir, lines, selectedText) {
       const sessionId =
         targetSessionId ||
@@ -670,6 +903,7 @@ window.__ModuleLoader__.load({
           : baseFileName
       const header = lineSpec ? `${rel}:${lineSpec}` : rel
       const mention = /\s/.test(header) ? `@"${header}"` : `@${header}`
+      rememberChipPath(label, lineSpec ? `${fullPath}:${lineSpec}` : fullPath)
       const modelPayload = selectedText ? `\`\`\`${header}\n${selectedText}\n\`\`\`` : mention
 
       return insertComposerChip(ctx, sessionId, {
@@ -1605,7 +1839,13 @@ window.__ModuleLoader__.load({
       const info = typeof useTabInfo === 'function' ? useTabInfo() : null
       const visible = info?.tab?.visible !== false
       const address = info?.tab?.navigation?.address ?? info?.tab?.contentId ?? ''
-      const paramsPath = info?.tab?.navigation?.params?.path ?? extractFileFromAddress(address)
+      const [target, setTarget] = useState(() => workbenchHolder.target)
+      useEffect(() => {
+        const fn = () => setTarget(workbenchHolder.target ? { ...workbenchHolder.target } : null)
+        workbenchHolder.targetListeners.add(fn)
+        fn()
+        return () => workbenchHolder.targetListeners.delete(fn)
+      }, [])
 
       recordSessionInputProps(sessionId, inputActions, useInput)
 
@@ -1671,31 +1911,29 @@ window.__ModuleLoader__.load({
         }
       }, [visible, sessionId])
 
+      const fullFile = target?.path || ''
+      const paramsLine = target?.line || 0
+      const targetSeq = target?.seq || 0
+
       useEffect(() => {
         if (!visible || state.loading || state.error || !state.port || !state.cwd) return
         const container = hostRef.current
         if (!container) return
 
-        const folderPath = state.cwd.startsWith('/') ? state.cwd : `/${state.cwd}`
         const isDark = isDarkScheme(ctx)
-        let url = `http://127.0.0.1:${state.port}/?folder=${encodeURIComponent(folderPath)}&theme=${isDark ? 'dark' : 'light'}`
-        if (paramsPath) {
-          const fullFile = paramsPath.startsWith('/')
-            ? paramsPath
-            : `${folderPath.replace(/\/$/, '')}/${paramsPath}`
-          const payload = JSON.stringify([['openFile', `vscode-remote://127.0.0.1:${state.port}${fullFile}`]])
-          url += `&payload=${encodeURIComponent(payload)}`
-        }
-
-        const iframe = ensureIframe(url, state.cwd, state.port)
+        const bootKey = fullFile ? `${fullFile}#${paramsLine || ''}` : ''
+        const existed = !!workbenchHolder.iframe
+        const url = buildWorkbenchUrl(state.port, state.cwd, isDark, fullFile, paramsLine)
+        const iframe = ensureIframe(url, state.cwd, state.port, bootKey)
         attachIframeToHost(iframe, container)
+        if (existed && fullFile) requestWorkbenchOpen(ctx, state.port, state.cwd, fullFile, paramsLine)
 
         return () => {
           if (workbenchHolder.iframe && workbenchHolder.iframe.parentNode === container) {
             parkIframe()
           }
         }
-      }, [visible, state.loading, state.error, state.port, state.cwd, paramsPath])
+      }, [visible, state.loading, state.error, state.port, state.cwd, fullFile, paramsLine, targetSeq])
 
       return h(
         'div',
@@ -4823,6 +5061,14 @@ window.__ModuleLoader__.load({
           }, 'dsh-trae-solo: live theme sync')
         })
 
+        // 3a. Route file-link opens into the SOLO editor tab
+        ctx.inject(['sidebarRight'], (rctx) => {
+          rctx.effect(() => installFileOpenRouting(rctx), 'dsh-trae-solo: file open routing')
+        })
+
+        // 3b. Absolute-path hover tooltips
+        ctx.effect(() => installAbsolutePathHover(ctx), 'dsh-trae-solo: absolute path hover')
+
         // 4. Message & Drag-Drop Bridge for Reference Insertion
         ctx.effect(() => {
           let activeDraggedPath = null
@@ -4834,6 +5080,15 @@ window.__ModuleLoader__.load({
               setTimeout(() => {
                 activeDraggedPath = null
               }, 400)
+            } else if (ev.data && ev.data.type === 'trae-solo:ready') {
+              if (workbenchHolder.iframe && ev.source === workbenchHolder.iframe.contentWindow) {
+                workbenchHolder.ready = true
+                if (workbenchHolder.pendingOpen && workbenchHolder.flushPending) workbenchHolder.flushPending()
+              }
+            } else if (ev.data && ev.data.type === 'trae-solo:open-file-ack') {
+              workbenchHolder.pendingOpen = null
+              if (workbenchHolder.openTimer) clearTimeout(workbenchHolder.openTimer)
+              workbenchHolder.openTimer = null
             } else if (ev.data && ev.data.type === 'trae-solo:insert-reference') {
               if (ev.data.path) {
                 const targetSid =

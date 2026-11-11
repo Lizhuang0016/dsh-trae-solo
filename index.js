@@ -75,6 +75,10 @@ const USER_SETTINGS_PATH = join(USER_DATA_DIR, 'User', 'settings.json')
 const TRAE_DEFAULT_SETTINGS = {
   'files.autoSave': 'afterDelay',
   'files.autoSaveDelay': 500,
+  // Append-style tabs: every opened file gets its own tab instead of replacing the italic "preview" tab
+  'workbench.editor.enablePreview': false,
+  'workbench.editor.enablePreviewFromQuickOpen': false,
+  'workbench.editor.enablePreviewFromCodeNavigation': false,
   'workbench.sideBar.location': 'right',
   'workbench.secondarySideBar.defaultVisibility': 'hidden',
   'workbench.activityBar.location': 'top',
@@ -145,6 +149,9 @@ function ensureTraeConfiguration() {
       ...TRAE_DEFAULT_SETTINGS,
       ...existing,
       'files.autoSave': existing['files.autoSave'] ?? 'afterDelay',
+      'workbench.editor.enablePreview': false,
+      'workbench.editor.enablePreviewFromQuickOpen': false,
+      'workbench.editor.enablePreviewFromCodeNavigation': false,
       'workbench.sideBar.location': 'right',
       'workbench.secondarySideBar.defaultVisibility': 'hidden',
       'workbench.activityBar.location': 'top',
@@ -261,6 +268,12 @@ function ensureTraeConfiguration() {
       if (js.includes(targetTheme)) {
         const patchTheme = `t.invokeFunction(i=>{try{const cfg=i.get(z);window.setTraeTheme=(d)=>{cfg.updateValue('workbench.colorTheme',d?'Default Dark Modern':'Default Light Modern',2);cfg.updateValue('workbench.colorCustomizations',d?{'statusBar.background':'#18181b','statusBar.foreground':'#a1a1aa','statusBar.noFolderBackground':'#18181b','statusBar.border':'#27272a','sideBar.background':'#18181b','sideBar.border':'#27272a','sideBarSectionHeader.background':'#202024','sideBarSectionHeader.foreground':'#e4e4e7','editor.background':'#121215','editorGroupHeader.tabsBackground':'#18181b','tab.activeBackground':'#121215','tab.inactiveBackground':'#18181b','tab.activeBorderTop':'#10b981','focusBorder':'#10b981','activityBarBadge.background':'#3b82f6','activityBarBadge.foreground':'#ffffff'}:{'statusBar.background':'#f3f4f6','statusBar.foreground':'#4b5563','statusBar.noFolderBackground':'#f3f4f6','statusBar.border':'#e5e7eb','sideBar.background':'#f9fafb','sideBar.border':'#e5e7eb','sideBarSectionHeader.background':'#f3f4f6','sideBarSectionHeader.foreground':'#374151','editorGroupHeader.tabsBackground':'#f9fafb','tab.activeBackground':'#ffffff','tab.inactiveBackground':'#f3f4f6','tab.activeBorderTop':'#10b981','focusBorder':'#10b981','activityBarBadge.background':'#3b82f6','activityBarBadge.foreground':'#ffffff'},2)};window.addEventListener('message',m=>{if(m.data?.type==='trae-solo:set-theme'){window.setTraeTheme(m.data.mode==='dark')}});try{const ls=i.get(Zh);if(ls?.setPartHidden)ls.setPartHidden(true,'workbench.parts.auxiliarybar')}catch(e){}}catch(e){};const n=i.get(De)`
         js = js.replace(targetTheme, patchTheme)
+        jsChanged = true
+      }
+      const openFileMarker = "window.addEventListener('message',m=>{if(m.data?.type==='trae-solo:set-theme'){window.setTraeTheme(m.data.mode==='dark')}});"
+      if (js.includes(openFileMarker) && !js.includes('trae-solo:open-file')) {
+        const openFilePatch = `window.addEventListener('message',m=>{try{const d=m.data;if(d&&d.type==='trae-solo:open-file'&&typeof d.path==='string'){const uri='vscode-remote://'+window.location.host+encodeURI(d.path)+(d.line?'#L'+d.line:'');t.invokeFunction(a=>a.get(Ct).open(uri,{fromUserGesture:true})).then(()=>{try{window.parent.postMessage({type:'trae-solo:open-file-ack',path:d.path},'*')}catch(e){}},e=>console.error('trae-solo open-file failed',e))}}catch(e){console.error(e)}});setTimeout(()=>{try{window.parent.postMessage({type:'trae-solo:ready'},'*')}catch(e){}},0);window.addEventListener('load',()=>{try{window.parent.postMessage({type:'trae-solo:ready'},'*')}catch(e){}});`
+        js = js.replace(openFileMarker, openFileMarker + openFilePatch)
         jsChanged = true
       }
       const targetLayoutLoad = 'for(t in Qt){const r=Qt[t];this.b.get(r.name)===void 0&&this.b.set(r.name,r.defaultValue)}'
